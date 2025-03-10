@@ -34,7 +34,7 @@ if __name__ == '__main__':
         train_dataset, valid_dataset = random_split(dataset, [0.8, 0.2])
 
     train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=2)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=1)
 
     # Label and id
     id2label = {"0": "not water", "1": "water"}
@@ -54,6 +54,9 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
+    print('Device: ', device)
+
+    # Training
     model.train()
     for epoch in range(args.num_epochs):  
         print("Epoch:", epoch)
@@ -100,6 +103,39 @@ if __name__ == '__main__':
             torch.save(model.state_dict(), 'checkpoint_' + str(epoch+1) + '.pth')
 
     torch.save(model.state_dict(), 'model.pth')
+
+    # Inference
+
+    os.makedirs('outputs', exist_ok = True)
+
+    # Color palette 
+    palette = np.array([[120,120,120], [120,120,180]])
+
+    model.eval()
+    for idx, batch in enumerate(tqdm(valid_dataloader)):
+        pixel_values = batch["pixel_values"].to(device)
+        labels = batch["labels"].to(device)
+
+        with torch.no_grad():
+            outputs = model(pixel_values=pixel_values)
+
+        logits = outputs.logits.cpu()
+
+        predicted_segmentation_map = image_processor.post_process_semantic_segmentation(outputs, target_sizes=[(256,256)])[0]
+        predicted_segmentation_map = predicted_segmentation_map.cpu().numpy()
+
+        color_seg = np.zeros((predicted_segmentation_map.shape[0],
+                            predicted_segmentation_map.shape[1], 3), dtype=np.uint8) # height, width, 3
+
+        for label, color in enumerate(palette):
+            color_seg[predicted_segmentation_map == label, :] = color
+
+        # Show image + mask
+        img = np.array(batch["original_image"].squeeze()) * 0.5 + color_seg * 0.5
+        img = img.astype(np.uint8)
+
+        plt.imsave('outputs/output_' + str(idx)+'.png', img)
+    
         
 
 

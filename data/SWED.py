@@ -8,7 +8,7 @@ class SWED(Dataset):
     self.image_processor = image_processor
     self.id2label = {"0": "not water", "1": "water"}
 
-    self.images = sorted(os.listdir(os.path.join(self.root_dir, split, 'images')))[0:30]
+    self.images = sorted(os.listdir(os.path.join(self.root_dir, split, 'images')))
 
   def __len__(self):
     return len(self.images)
@@ -16,18 +16,19 @@ class SWED(Dataset):
   def __getitem__(self,idx):
     im_path = os.path.join(self.root_dir, 'train', 'images', self.images[idx])
     label_path = os.path.join(self.root_dir, 'train', 'labels', self.images[idx].replace('image', 'chip'))
-    im = np.load(im_path)
+    img = np.load(im_path)
     label = np.load(label_path)[0]
-    bgr = im[:,:,1:4]
+    img = img [:,:,[3,2,1]]
     for i in range(3):
-      m = np.min(bgr[:,:,i])
-      M = np.max(bgr[:,:,i])
-      bgr[:,:,i] = (bgr[:,:,i]-m)/(M-m)*255
-    rgb = bgr[:,:,::-1]
+      m = np.min(img[:,:,i])
+      M = np.max(img[:,:,i])
+      img[:,:,i] = (img[:,:,i]-m)/(M-m)*255
 
-    encoded_inputs = self.image_processor(rgb, label, return_tensors="pt")
+    encoded_inputs = self.image_processor(img, label, return_tensors="pt")
 
     for k,v in encoded_inputs.items():
       encoded_inputs[k].squeeze_() # remove batch dimension
+
+    encoded_inputs["original_image"] = img.astype(np.uint8)
 
     return encoded_inputs
