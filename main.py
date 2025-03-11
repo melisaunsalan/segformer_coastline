@@ -12,12 +12,18 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 from torch import nn
 from sklearn.metrics import accuracy_score
 from tqdm import tqdm
+from datasets import disable_caching
 
 from data.copy_paste import CopyPaste
 from data.SNOWED import SNOWED
 from data.SWED import SWED
 
 if __name__ == '__main__':
+
+    disable_caching()
+    torch.manual_seed(0)
+    np.random.seed(0)
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["swed", "snowed"], default = 'snowed')
     parser.add_argument("--path", help = "Path to dataset", default="data/SNOWED_v02/SNOWED")
