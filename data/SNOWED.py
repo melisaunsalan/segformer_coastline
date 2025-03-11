@@ -4,9 +4,11 @@ import numpy as np
 from torch.utils.data import Dataset
 
 class SNOWED(Dataset):
-  def __init__(self, root_dir, image_processor):
+  def __init__(self, root_dir, image_processor, bands = 'rgb'):
     self.path = root_dir
     self.image_processor = image_processor
+
+    self.bands = bands
 
     self.images = sorted(os.listdir(self.path)) 
 
@@ -17,8 +19,12 @@ class SNOWED(Dataset):
     sample_dir = os.path.join(self.path, self.images[idx])
     sample_2A = np.load(os.path.join(sample_dir, 'sample_2A.npy'))
     label = np.load(os.path.join(sample_dir, 'label.npy'))
-
-    img = sample_2A[:,:,[3,2,1]]
+    
+    if self.bands == 'rgb':
+      img = sample_2A[:,:,[3,2,1]]
+    elif self.bands == 'color_ir':
+      img = sample_2A[:,:,[7,2,1]]
+      
     for i in range(3):
       m = np.min(img[:,:,i])
       M = np.max(img[:,:,i])
