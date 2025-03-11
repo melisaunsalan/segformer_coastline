@@ -5,6 +5,7 @@ import torch
 import evaluate
 import json
 import argparse
+import albumentations as A
 
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
@@ -12,6 +13,7 @@ from torch import nn
 from sklearn.metrics import accuracy_score
 from tqdm import tqdm
 
+from data.copy_paste import CopyPaste
 from data.SNOWED import SNOWED
 from data.SWED import SWED
 
@@ -20,19 +22,33 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", choices=["swed", "snowed"], default = 'snowed')
     parser.add_argument("--path", help = "Path to dataset", default="data/SNOWED_v02/SNOWED")
     parser.add_argument("--num_epochs", default=100, type=int)
-    parser.add_argument("--bands", choices=['rgb', 'color_ir'], help = 'Sentinel-2 band combination, rgb = B4B3B2, colorIR = B8B3B2')
+    parser.add_argument("--bands", choices=['rgb', 'color_ir'], default = 'rgb' , help = 'Sentinel-2 band combination, rgb = B4B3B2, colorIR = B8B3B2')
+    parser.add_argument("--copypaste", action = "store_true")
+    parser.add_argument("--prob", type = float, default=0.5)
     args = parser.parse_args() 
 
     # Load dataset
     image_processor = SegformerImageProcessor(reduce_labels=True)
 
+    if args.copypaste:
+        transform = A.Compose([
+        A.RandomScale(scale_limit=(0.1, 1), p=args.prob), 
+        A.PadIfNeeded(256, 256, border_mode=0),
+        A.RandomCrop(256, 256),
+        CopyPaste(blend=True, sigma=1, pct_objects_paste=None, p=args.prob) 
+    ], bbox_params=A.BboxParams(format="coco",min_visibility=0.05, label_fields = [])
+    )
+    else:
+        transform = None
+
     if args.dataset == "swed":
         dataset = SWED(root_dir=args.path, image_processor=image_processor)
         # TODO: update test dataset 
         # TODO: add color ir
+        # TODO: add copy paste augmentation
         train_dataset, valid_dataset = random_split(dataset, [0.8, 0.2])
     else:
-        dataset = SNOWED(root_dir=args.path, image_processor=image_processor, bands=args.bands)
+        dataset = SNOWED(root_dir=args.path, image_processor=image_processor, bands=args.bands, transform = transform)
         train_dataset, valid_dataset = random_split(dataset, [0.8, 0.2])
 
     train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True)
