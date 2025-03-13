@@ -25,7 +25,7 @@ class SNOWED(Dataset):
     if self.bands == 'rgb':
       img = sample_2A[:,:,[3,2,1]]
     elif self.bands == 'color_ir':
-      img = sample_2A[:,:,[7,2,1]]
+      img = sample_2A[:,:,[7,3,2]]
     for i in range(3):
       m = np.min(img[:,:,i])
       M = np.max(img[:,:,i])
