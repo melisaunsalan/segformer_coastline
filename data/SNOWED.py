@@ -23,13 +23,24 @@ class SNOWED(Dataset):
     label = np.load(os.path.join(sample_dir, 'label.npy'))
     img = None
     if self.bands == 'rgb':
-      img = sample_2A[:,:,[3,2,1]]
+      img = sample_2A[:,:,[3,2,1]]  # Red, Green, Blue
     elif self.bands == 'color_ir':
-      img = sample_2A[:,:,[7,3,2]]
-    for i in range(3):
+      img = sample_2A[:,:,[7,3,2]]  # NIR, Red, Green
+    elif self.bands == 'ndwi': # (Green – NIR) / (Green + NIR)
+      b8 = img[:,:,7]
+      b3 = img[:,:,2]
+      b8 = (b8-np.min(b8))/(np.max(b8)-np.min(b8))
+      b3 = (b3-np.min(b3))/(np.max(b3)-np.min(b3))
+      ndwi = (b3 - b8)/(b3+b8)
+      img = np.repeat(ndwi[:,:,np.newaxis], 3,axis =2) # 2d to 3d
+
+    for i in range(3) and self.bands!='ndwi':
       m = np.min(img[:,:,i])
       M = np.max(img[:,:,i])
       img[:,:,i] = (img[:,:,i]-m)/(M-m)*255
+
+    img[~np.isfinite(img)] = 0 # Remove inf or NaN
+
     return img, label
 
   def __getitem__(self,idx):
