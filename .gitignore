@@ -183,3 +183,5 @@ data/.DS_Store
 outputs/
 
 *.png
+*.pt
+*.pth
