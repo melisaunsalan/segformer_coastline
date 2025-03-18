@@ -34,10 +34,11 @@ class SNOWED(Dataset):
       ndwi = (b3 - b8)/(b3+b8)
       img = np.repeat(ndwi[:,:,np.newaxis], 3,axis =2) # 2d to 3d
 
-    for i in range(3) and self.bands!='ndwi':
-      m = np.min(img[:,:,i])
-      M = np.max(img[:,:,i])
-      img[:,:,i] = (img[:,:,i]-m)/(M-m)*255
+    if self.bands!="ndwi":
+      for i in range(3):
+        m = np.min(img[:,:,i])
+        M = np.max(img[:,:,i])
+        img[:,:,i] = (img[:,:,i]-m)/(M-m)*255
 
     img[~np.isfinite(img)] = 0 # Remove inf or NaN
 
