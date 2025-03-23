@@ -2,6 +2,9 @@ RANDOMNESS:
   torch_seed: 0
   numpy_seed: 0
 
+EXPERIMENT:
+  name: "exp_1"
+
 DATASET_PARAMS:
   db_name: "snowed" # options: swed or snowed
   db_path: "data/SNOWED_v02/SNOWED" # dataset path
@@ -17,6 +20,7 @@ TRAIN_PARAMS:
 
 MODEL_PARAMS:
   model_config: "b0" # b0-5
+  checkpoint: ~
 
 OUTPUT_PATH:
   weights_path: "weights"
