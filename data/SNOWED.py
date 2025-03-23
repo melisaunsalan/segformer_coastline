@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import random
+import torch
 
 from data.copy_paste import CopyPaste, extract_bboxes
 from torch.utils.data import Dataset
@@ -19,29 +20,34 @@ class SNOWED(Dataset):
     return len(self.images)
   
   def read_image(self, sample_dir):
-    sample_2A = np.load(os.path.join(sample_dir, 'sample_2A.npy'))
+    # Retrieve data
+    sample_2A = np.load(os.path.join(sample_dir, 'sample_2A.npy')).astype(np.float32)
     label = np.load(os.path.join(sample_dir, 'label.npy'))
     img = None
+
+    # Select the bands
     if self.bands == 'rgb':
       img = sample_2A[:,:,[3,2,1]]  # Red, Green, Blue
     elif self.bands == 'color_ir':
-      img = sample_2A[:,:,[7,3,2]]  # NIR, Red, Green
-    elif self.bands == 'ndwi': # (Green – NIR) / (Green + NIR)
-      b8 = img[:,:,7]
-      b3 = img[:,:,2]
-      b8 = (b8-np.min(b8))/(np.max(b8)-np.min(b8))
-      b3 = (b3-np.min(b3))/(np.max(b3)-np.min(b3))
-      ndwi = (b3 - b8)/(b3+b8)
-      img = np.repeat(ndwi[:,:,np.newaxis], 3,axis =2) # 2d to 3d
+      img = sample_2A[:,:,[7,3,2]]
+    elif self.bands == 'ndwi':
+      # Compute ndwi image 
+      nir = sample_2A[:, :, 7]
+      swir = sample_2A[:, :, 11]
+      img = (nir - swir) / (nir + swir + 1e-6)
+      # Normalize and return ndwi
+      img = (img - np.min(img)) / (np.max(img) - np.min(img))
+      # Add an extra dimension
+      img = np.expand_dims(img, axis=-1) 
+      return img, label 
+    else:
+      assert "Invalid band selection!"
 
-    if self.bands!="ndwi":
-      for i in range(3):
-        m = np.min(img[:,:,i])
-        M = np.max(img[:,:,i])
-        img[:,:,i] = (img[:,:,i]-m)/(M-m)*255
-
-    img[~np.isfinite(img)] = 0 # Remove inf or NaN
-
+    # Normalize channels
+    for i in range(img.shape[-1]):
+      m = np.min(img[:,:,i])
+      M = np.max(img[:,:,i])
+      img[:,:,i] = (img[:,:,i]-m)/(M-m)
     return img, label
 
   def __getitem__(self,idx):
@@ -53,20 +59,22 @@ class SNOWED(Dataset):
       paste_idx = random.randint(0, self.__len__() - 1)
       paste_img, paste_label = self.read_image(os.path.join(self.path, self.images[paste_idx]))
       # invert 0 and 1 in order to paste areas without water
-      paste_label = np.where((paste_label==0)|(paste_label==1), paste_label^1, paste_label)
-  
+      paste_label_inversed = np.where((paste_label==0)|(paste_label==1), paste_label^1, paste_label)
       out = self.transform(image = img, masks = np.expand_dims(label, 0),
                            bboxes = extract_bboxes(np.expand_dims(label, 0)),
-                           paste_image = paste_img, paste_masks = np.expand_dims(paste_label, 0),
-                           paste_bboxes = extract_bboxes(np.expand_dims(paste_label, 0)))
-      encoded_inputs = self.image_processor(out['image'], np.array(out['masks'][0]), return_tensors="pt")
-    
+                           paste_image = paste_img, paste_masks = np.expand_dims(paste_label_inversed, 0),
+                           paste_bboxes = extract_bboxes(np.expand_dims(paste_label_inversed, 0)))
+      encoded_inputs = self.image_processor(out['image'], return_tensors="pt")
+      
+      # Replace with the new segmentation map
+      label = np.array(out['masks'][0])
     else:
-      encoded_inputs = self.image_processor(img, label, return_tensors="pt")
+      encoded_inputs = self.image_processor(img, return_tensors="pt")
 
     for k,v in encoded_inputs.items():
-      encoded_inputs[k].squeeze_() # remove batch dimension
+      encoded_inputs[k] = v.squeeze(0) # remove batch dimension
 
     encoded_inputs["original_image"] = img.astype(np.uint8)
+    encoded_inputs["original_labels"] = torch.from_numpy(label).long()
 
     return encoded_inputs

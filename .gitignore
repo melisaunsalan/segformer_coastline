@@ -181,6 +181,8 @@ data/.DS_Store
 .vscode
 
 outputs/
+datasets
+experiments
 
 *.png
 *.pt

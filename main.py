@@ -19,6 +19,8 @@ from data.copy_paste import CopyPaste
 from data.SNOWED import SNOWED
 from data.SWED import SWED
 
+from torch.utils.tensorboard import SummaryWriter
+
 if __name__ == '__main__':
 
     disable_caching()
@@ -35,7 +37,18 @@ if __name__ == '__main__':
     # Load dataset
     image_processor = SegformerImageProcessor(reduce_labels=True)
 
-    if cfg['DATASET_PARAMS']['use_copypaste_aug']:
+    # Init TensorBoard logger
+    experiments_path = "experiments"
+    os.makedirs(experiments_path, exist_ok=True)
+    exp_path = os.path.join(experiments_path, cfg['EXPERIMENT']['name'])
+    writer = SummaryWriter(log_dir=exp_path)
+
+    # Load dataset
+    image_processor = SegformerImageProcessor(do_rescale=False,
+                                              do_normalize=False)
+
+
+    if cfg['DATASET_PARAMS']['use_copypaste_aug']: 
         transform = A.Compose([
         A.RandomScale(scale_limit=(0.1, 1), p=cfg['DATASET_PARAMS']['probability_of_aug']), 
         A.PadIfNeeded(256, 256, border_mode=0),
@@ -64,21 +77,47 @@ if __name__ == '__main__':
     id2label = {int(k): v for k, v in id2label.items()}
     label2id = {v: k for k, v in id2label.items()}
 
-    model = SegformerForSemanticSegmentation.from_pretrained("nvidia/mit-" + cfg['MODEL_PARAMS']['model_config'],
-                                                            num_labels=2,
-                                                            id2label=id2label,
-                                                            label2id=label2id) 
-     
-    metric = evaluate.load("mean_iou") 
+    # Devine the model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print('Running on device: ', device)
+    ckp_path = getattr(args, "ckp", None)
+    if ckp_path and os.path.isfile(ckp_path):
+        print(f"Loading model from checkpoint: {ckp_path}")
+        model = SegformerForSemanticSegmentation(num_labels=2, id2label=id2label, label2id=label2id)
+        model.load_state_dict(torch.load(ckp_path, map_location=device), strict=True)
+    else:
+        print("No valid checkpoint provided, loading pretrained model.")
+        model = SegformerForSemanticSegmentation.from_pretrained(
+            "nvidia/mit-b0", num_labels=2, id2label=id2label, label2id=label2id
+        )
+
+    # If ndwi band is selected, replace the overlapping patch embeddings
+    if cfg['DATASET_PARAMS']['bands'] == 'ndwi':
+        model.segformer.encoder.patch_embeddings[0].proj = torch.nn.Conv2d(in_channels=1, 
+                                                                           out_channels=model.config.hidden_sizes[0],
+                                                                           kernel_size=model.config.patch_sizes[0], 
+                                                                           stride=model.config.strides[0])
+
+    # Move model to device
+    model.to(device)   
 
     # define optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['TRAIN_PARAMS']['lr'])
-    # move model to GPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    print('Device: ', device)
     os.makedirs(cfg['OUTPUT_PATH']['weights_path'], exist_ok=True)
+
+    # Best metric and model
+    best_iou = 0
+    best_model = None
+
+    # Define metrics
+    cache_dir = f"exp/{cfg['EXPERIMENT']['name']}/cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    iou_metric = evaluate.load("mean_iou", cache_dir=cache_dir) 
+    val_iou_metric = evaluate.load("mean_iou", cache_dir=cache_dir) 
+
+    # Create the output path and color pallete for predictions
+    os.makedirs(cfg['OUTPUT_PATH']['inference_path'], exist_ok = True)
+    palette = np.array([[255, 255, 0], [255, 0, 255]])
 
     # Training
     model.train()
@@ -87,7 +126,7 @@ if __name__ == '__main__':
         for idx, batch in enumerate(tqdm(train_dataloader)):
             # get the inputs;
             pixel_values = batch["pixel_values"].to(device)
-            labels = batch["labels"].to(device)
+            labels = batch["original_labels"].to(device)
 
             # zero the parameter gradients
             optimizer.zero_grad()
@@ -99,66 +138,99 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
 
-            # evaluate
+            # Compute training metrics
             with torch.no_grad():
                 upsampled_logits = nn.functional.interpolate(logits, size=labels.shape[-2:], mode="bilinear", align_corners=False)
                 predicted = upsampled_logits.argmax(dim=1)
 
-                # note that the metric expects predictions + labels as numpy arrays
-                metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=labels.detach().cpu().numpy())
+                # Predict arrays
+                pred_arr = predicted.detach().cpu().numpy()
+                labels_arr = labels.detach().cpu().numpy()
 
-            # let's print loss and metrics every 100 batches
-            if idx % 100 == 0:
-            # currently using _compute instead of compute
-            # see this issue for more info: https://github.com/huggingface/evaluate/pull/328#issuecomment-1286866576
-                metrics = metric._compute(
-                        predictions=predicted.cpu(),
-                        references=labels.cpu(),
-                        num_labels=len(id2label),
-                        ignore_index=255,
-                        reduce_labels=False, # we've already reduced the labels ourselves
-                    )
+                # Add batch
+                iou_metric.add_batch(predictions=pred_arr, 
+                                 references=labels_arr)
 
-                print("Loss:", loss.item())
-                print("Mean_iou:", metrics["mean_iou"])
-                print("Mean accuracy:", metrics["mean_accuracy"])
+        # Compute the score
+        iou_metrics = iou_metric.compute(num_labels=2, ignore_index=255)
 
-        if (epoch+1)%10 == 0:
-            torch.save(model.state_dict(), os.path.join(cfg['OUTPUT_PATH']['weights_path'], 'checkpoint_' + str(epoch+1) + '.pth'))
+        print("Loss:", loss.item())
+        print("Mean IOU:", iou_metrics["mean_iou"])
+        print("Mean accuracy:", iou_metrics["mean_accuracy"])
 
-    torch.save(model.state_dict(), os.path.join(cfg['OUTPUT_PATH']['weights_path'], cfg['OUTPUT_PATH']['model_name']))
+        # Log to TensorBoard
+        writer.add_scalar('Loss/train', loss.item(), epoch)
+        writer.add_scalar('Train_Metrics/mean_iou', iou_metrics["mean_iou"], epoch)
+        writer.add_scalar('Train_Metrics/mean_acc', iou_metrics["mean_accuracy"], epoch)
 
-    # Inference
+        # Evaluate after each epoch
+        model.eval()
+        val_loss = 0.0
+        for val_idx, val_batch in enumerate(tqdm(valid_dataloader)):
+            with torch.no_grad():
+                pixel_values = val_batch["pixel_values"].to(device)
+                labels = val_batch["original_labels"].to(device)
 
-    os.makedirs(cfg['OUTPUT_PATH']['inference_path'], exist_ok = True)
+                # Forward pass
+                outputs = model(pixel_values=pixel_values, labels=labels)
+                loss, logits = outputs.loss, outputs.logits
+                val_loss += loss.item()
 
-    # Color palette 
-    palette = np.array([[120,120,120], [120,120,180]])
+                # Upsample logits
+                upsampled_logits = nn.functional.interpolate(logits, size=labels.shape[-2:], mode="bilinear", align_corners=False)
+                predicted = upsampled_logits.argmax(dim=1)
 
-    model.eval()
-    for idx, batch in enumerate(tqdm(valid_dataloader)):
-        pixel_values = batch["pixel_values"].to(device)
-        labels = batch["labels"].to(device)
+                # Convert preds and labels to numpy 
+                pred_arr = predicted.detach().cpu().numpy()
+                labels_arr = labels.detach().cpu().numpy()
 
-        with torch.no_grad():
-            outputs = model(pixel_values=pixel_values)
+                if epoch == cfg['TRAIN_PARAMS']['num_epochs'] - 1:
+                    # If last epoch => save preditions
+                    predicted_segmentation_map = image_processor.post_process_semantic_segmentation(outputs, target_sizes=[(256,256)])[0]
+                    predicted_segmentation_map = predicted_segmentation_map.cpu().numpy()
 
-        logits = outputs.logits.cpu()
+                    h, w = predicted_segmentation_map.shape
+                    color_seg = np.zeros((h, w, 3), dtype=np.uint8)
+                    for label, color in enumerate(palette):
+                        color_seg[predicted_segmentation_map == label, :] = color
+                    
+                    # Original image
+                    # img = np.array(batch["original_image"].squeeze())
+                    # plt.imsave(cfg['OUTPUT_PATH']['inference_path'] + '/output_' + str(idx)+'_orig.png', img)
 
-        predicted_segmentation_map = image_processor.post_process_semantic_segmentation(outputs, target_sizes=[(256,256)])[0]
-        predicted_segmentation_map = predicted_segmentation_map.cpu().numpy()
+                    # Segmentation map
+                    img = np.array(batch["original_image"].squeeze()) * 0.5 + color_seg * 0.5
+                    img = img.astype(np.uint8)
+                    plt.imsave(cfg['OUTPUT_PATH']['inference_path'] + '/output_' + str(idx)+'.png', img)
 
-        color_seg = np.zeros((predicted_segmentation_map.shape[0],
-                            predicted_segmentation_map.shape[1], 3), dtype=np.uint8) # height, width, 3
+                # Add batch
+                val_iou_metric.add_batch(predictions=pred_arr, references=labels_arr)
 
-        for label, color in enumerate(palette):
-            color_seg[predicted_segmentation_map == label, :] = color
+        # Compute and log loss and metrics
+        iou_val_metrics = val_iou_metric.compute(num_labels=2, ignore_index=255)
+        print("Validation Loss:", val_loss / len(valid_dataloader))
+        print("Validation Mean IoU:", iou_val_metrics["mean_iou"])
+        print("Validation Mean accuracy:", iou_val_metrics["mean_accuracy"])
 
-        # Show image + mask
-        img = np.array(batch["original_image"].squeeze()) * 0.5 + color_seg * 0.5
-        img = img.astype(np.uint8)
+        writer.add_scalar('Loss/val', val_loss / len(valid_dataloader), epoch)
+        writer.add_scalar('Validation_Metrics/mean_iou', iou_val_metrics["mean_iou"], epoch)
+        writer.add_scalar('Validation_Metrics/mean_acc', iou_val_metrics["mean_accuracy"], epoch)
 
-        plt.imsave(cfg['OUTPUT_PATH']['inference_path'] + '/output_' + str(idx)+'.png', img)
+        # Save best model
+        if iou_val_metrics["mean_iou"] > best_iou:
+            best_iou = iou_val_metrics["mean_iou"]
+            best_model_path = os.path.join(exp_path, "best_model.pth")
+            torch.save(model.state_dict(), best_model_path)
+            print(f"Epoch: {epoch+1}. Best model saved at {best_model_path}.")
+    
+        model.train()
+
+        if (epoch + 1) % 10 == 0:
+            torch.save(model.state_dict(), os.path.join(exp_path, 'checkpoint_' + str(epoch+1) + '.pth'))
+
+    # Save last model
+    torch.save(model.state_dict(), os.path.join(exp_path, 'last_model.pth'))
+
     
         
 
