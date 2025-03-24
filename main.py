@@ -3,22 +3,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import evaluate
-import json
 import argparse
 import albumentations as A
 import yaml
 
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from torch import nn
-from sklearn.metrics import accuracy_score
 from tqdm import tqdm
 from datasets import disable_caching
-
 from data.copy_paste import CopyPaste
 from data.SNOWED import SNOWED
 from data.SWED import SWED
-
 from torch.utils.tensorboard import SummaryWriter
 
 if __name__ == '__main__':
@@ -37,17 +33,25 @@ if __name__ == '__main__':
     # Load dataset
     image_processor = SegformerImageProcessor(reduce_labels=True)
 
-    # Init TensorBoard logger
-    experiments_path = "experiments"
+    # Create the current experiment's path
+    experiments_path = cfg['EXPERIMENT']['exp_path']
     os.makedirs(experiments_path, exist_ok=True)
     exp_path = os.path.join(experiments_path, cfg['EXPERIMENT']['name'])
-    writer = SummaryWriter(log_dir=exp_path)
+    os.makedirs(exp_path, exist_ok=True)
 
-    # Load dataset
+    # Init TensorBoard logger
+    tb_logger_path = os.path.join(exp_path, 'tb_logger')
+    os.makedirs(tb_logger_path, exist_ok=True)
+    writer = SummaryWriter(log_dir=tb_logger_path)
+
+    # Dump the cfg file under the experiment path for better traceability
+    cfg_save_path = os.path.join(exp_path, "config.yaml")
+    with open(cfg_save_path, 'w') as outfile:
+        yaml.dump(cfg, outfile, default_flow_style=False)
+
+    # Init the image processor and transform
     image_processor = SegformerImageProcessor(do_rescale=False,
                                               do_normalize=False)
-
-
     if cfg['DATASET_PARAMS']['use_copypaste_aug']: 
         transform = A.Compose([
         A.RandomScale(scale_limit=(0.1, 1), p=cfg['DATASET_PARAMS']['probability_of_aug']), 
@@ -58,13 +62,19 @@ if __name__ == '__main__':
     )
     else:
         transform = None
-
+    
+    # Load the dataset
     if cfg['DATASET_PARAMS']['db_name'] == 'swed':
-        dataset = SWED(root_dir=cfg['DATASET_PARAMS']['db_path'], image_processor=image_processor)
-        # TODO: update test dataset 
-        # TODO: add color ir
-        # TODO: add copy paste augmentation
-        train_dataset, valid_dataset = random_split(dataset, [0.8, 0.2])
+        train_dataset = SWED(root_dir=cfg['DATASET_PARAMS']['db_path'], 
+                             image_processor=image_processor,
+                             transform=transform,
+                             bands = cfg['DATASET_PARAMS']['bands'],
+                             split='train')
+        valid_dataset = SWED(root_dir=cfg['DATASET_PARAMS']['db_path'], 
+                             image_processor=image_processor,
+                             transform=None,
+                             bands=cfg['DATASET_PARAMS']['bands'],
+                             split='test')
     else:
         dataset = SNOWED(root_dir=cfg['DATASET_PARAMS']['db_path'], image_processor=image_processor, bands=cfg['DATASET_PARAMS']['bands'], transform = transform)
         train_dataset, valid_dataset = random_split(dataset, [0.8, 0.2])
@@ -80,16 +90,17 @@ if __name__ == '__main__':
     # Devine the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('Running on device: ', device)
-    ckp_path = getattr(args, "ckp", None)
+    ckp_path = cfg['MODEL_PARAMS']['checkpoint']
     if ckp_path and os.path.isfile(ckp_path):
         print(f"Loading model from checkpoint: {ckp_path}")
         model = SegformerForSemanticSegmentation(num_labels=2, id2label=id2label, label2id=label2id)
         model.load_state_dict(torch.load(ckp_path, map_location=device), strict=True)
     else:
         print("No valid checkpoint provided, loading pretrained model.")
-        model = SegformerForSemanticSegmentation.from_pretrained(
-            "nvidia/mit-b0", num_labels=2, id2label=id2label, label2id=label2id
-        )
+        model = SegformerForSemanticSegmentation.from_pretrained("nvidia/mit-" + cfg['MODEL_PARAMS']['model_config'], 
+                                                                 num_labels=2, 
+                                                                 id2label=id2label, 
+                                                                 label2id=label2id)
 
     # If ndwi band is selected, replace the overlapping patch embeddings
     if cfg['DATASET_PARAMS']['bands'] == 'ndwi':
@@ -103,21 +114,22 @@ if __name__ == '__main__':
 
     # define optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['TRAIN_PARAMS']['lr'])
-    os.makedirs(cfg['OUTPUT_PATH']['weights_path'], exist_ok=True)
+    weights_path = os.path.join(exp_path, cfg['OUTPUT_PATH']['weights_path'])
+    os.makedirs(weights_path, exist_ok=True)
 
     # Best metric and model
     best_iou = 0
-    best_model = None
 
     # Define metrics
-    cache_dir = f"exp/{cfg['EXPERIMENT']['name']}/cache"
+    cache_dir = f"{exp_path}/cache"
     os.makedirs(cache_dir, exist_ok=True)
     iou_metric = evaluate.load("mean_iou", cache_dir=cache_dir) 
     val_iou_metric = evaluate.load("mean_iou", cache_dir=cache_dir) 
 
-    # Create the output path and color pallete for predictions
-    os.makedirs(cfg['OUTPUT_PATH']['inference_path'], exist_ok = True)
-    palette = np.array([[255, 255, 0], [255, 0, 255]])
+    # Create the output path and color pallete for predictions 
+    inference_path = os.path.join(exp_path, cfg['OUTPUT_PATH']['inference_path'])
+    os.makedirs(inference_path, exist_ok = True)
+    palette = np.array([[255, 255, 0], [255, 0, 255]])  # (Yellow => Land, Magenta => Water)
 
     # Training
     model.train()
@@ -184,8 +196,9 @@ if __name__ == '__main__':
                 pred_arr = predicted.detach().cpu().numpy()
                 labels_arr = labels.detach().cpu().numpy()
 
-                if epoch == cfg['TRAIN_PARAMS']['num_epochs'] - 1:
-                    # If last epoch => save preditions
+                # If last epoch => save the predition map
+                if epoch == cfg['TRAIN_PARAMS']['num_epochs'] - 1:    
+                    orig_img = np.array(batch["original_image"].squeeze())
                     predicted_segmentation_map = image_processor.post_process_semantic_segmentation(outputs, target_sizes=[(256,256)])[0]
                     predicted_segmentation_map = predicted_segmentation_map.cpu().numpy()
 
@@ -193,15 +206,19 @@ if __name__ == '__main__':
                     color_seg = np.zeros((h, w, 3), dtype=np.uint8)
                     for label, color in enumerate(palette):
                         color_seg[predicted_segmentation_map == label, :] = color
-                    
-                    # Original image
-                    # img = np.array(batch["original_image"].squeeze())
-                    # plt.imsave(cfg['OUTPUT_PATH']['inference_path'] + '/output_' + str(idx)+'_orig.png', img)
 
                     # Segmentation map
-                    img = np.array(batch["original_image"].squeeze()) * 0.5 + color_seg * 0.5
+                    img = orig_img * 0.8 + color_seg * 0.2
                     img = img.astype(np.uint8)
-                    plt.imsave(cfg['OUTPUT_PATH']['inference_path'] + '/output_' + str(idx)+'.png', img)
+                    plt.imsave(inference_path + '/output_' + str(idx)+'.png', img)
+
+                    # Save the true segmentation map
+                    color_seg = np.zeros((h, w, 3), dtype=np.uint8)
+                    for label, color in enumerate(palette):
+                        color_seg[labels_arr == label, :] = color
+                    img = orig_img * 0.8 + color_seg * 0.2
+                    img = img.astype(np.uint8)
+                    plt.imsave(inference_path + '/output_' + str(idx)+'_true.png', img)
 
                 # Add batch
                 val_iou_metric.add_batch(predictions=pred_arr, references=labels_arr)
@@ -219,17 +236,14 @@ if __name__ == '__main__':
         # Save best model
         if iou_val_metrics["mean_iou"] > best_iou:
             best_iou = iou_val_metrics["mean_iou"]
-            best_model_path = os.path.join(exp_path, "best_model.pth")
+            best_model_path = os.path.join(weights_path, "best_model.pth")
             torch.save(model.state_dict(), best_model_path)
             print(f"Epoch: {epoch+1}. Best model saved at {best_model_path}.")
     
         model.train()
 
         if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), os.path.join(exp_path, 'checkpoint_' + str(epoch+1) + '.pth'))
-
-    # Save last model
-    torch.save(model.state_dict(), os.path.join(exp_path, 'last_model.pth'))
+            torch.save(model.state_dict(), os.path.join(weights_path, 'checkpoint_' + str(epoch+1) + '.pth'))
 
     
         

@@ -29,17 +29,14 @@ class SNOWED(Dataset):
     if self.bands == 'rgb':
       img = sample_2A[:,:,[3,2,1]]  # Red, Green, Blue
     elif self.bands == 'color_ir':
-      img = sample_2A[:,:,[7,3,2]]
-    elif self.bands == 'ndwi':
-      # Compute ndwi image 
-      nir = sample_2A[:, :, 7]
-      swir = sample_2A[:, :, 11]
-      img = (nir - swir) / (nir + swir + 1e-6)
-      # Normalize and return ndwi
-      img = (img - np.min(img)) / (np.max(img) - np.min(img))
-      # Add an extra dimension
+      img = sample_2A[:,:,[7,3,2]]  # NIR, Red, Green
+    elif self.bands == 'ndwi':  #  (Green – NIR) / (Green + NIR)
+      b8 = img[:, :, 7]  # NIR
+      b3 = img[:, :, 2]  # Green
+      b8 = (b8 - np.min(b8)) / (np.max(b8) - np.min(b8))
+      b3 = (b3 - np.min(b3)) / (np.max(b3) - np.min(b3))
+      img = (b3 - b8) / (b3 + b8)
       img = np.expand_dims(img, axis=-1) 
-      return img, label 
     else:
       assert "Invalid band selection!"
 
@@ -48,6 +45,9 @@ class SNOWED(Dataset):
       m = np.min(img[:,:,i])
       M = np.max(img[:,:,i])
       img[:,:,i] = (img[:,:,i]-m)/(M-m)
+    
+    # Remove inf or NaN
+    img[~np.isfinite(img)] = 0
     return img, label
 
   def __getitem__(self,idx):
