@@ -13,7 +13,6 @@ class SNOWED(Dataset):
 
     self.bands = bands
     self.transform = transform
-  
     self.images = sorted(os.listdir(self.path)) 
 
   def __len__(self):
@@ -31,11 +30,9 @@ class SNOWED(Dataset):
     elif self.bands == 'color_ir':
       img = sample_2A[:,:,[7,3,2]]  # NIR, Red, Green
     elif self.bands == 'ndwi':  #  (Green – NIR) / (Green + NIR)
-      b8 = img[:, :, 7]  # NIR
-      b3 = img[:, :, 2]  # Green
-      b8 = (b8 - np.min(b8)) / (np.max(b8) - np.min(b8))
-      b3 = (b3 - np.min(b3)) / (np.max(b3) - np.min(b3))
-      img = (b3 - b8) / (b3 + b8)
+      b8 = sample_2A[:, :, 7]  # NIR
+      b3 = sample_2A[:, :, 2]  # Green
+      img = (b3 - b8) / (b3 + b8 + 1e-6)
       img = np.expand_dims(img, axis=-1) 
     else:
       assert "Invalid band selection!"
@@ -74,7 +71,7 @@ class SNOWED(Dataset):
     for k,v in encoded_inputs.items():
       encoded_inputs[k] = v.squeeze(0) # remove batch dimension
 
-    encoded_inputs["original_image"] = img.astype(np.uint8)
+    encoded_inputs["original_image"] = img
     encoded_inputs["original_labels"] = torch.from_numpy(label).long()
 
     return encoded_inputs

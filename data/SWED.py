@@ -3,8 +3,7 @@ import numpy as np
 import tifffile as tiff
 import random
 import torch
-
-from data.copy_paste import extract_bboxes
+from .copy_paste import extract_bboxes
 from torch.utils.data import Dataset
 
 class SWED(Dataset):
@@ -28,20 +27,17 @@ class SWED(Dataset):
     elif self.bands == 'ndwi':  #  (Green – NIR) / (Green + NIR)
       b8 = img[:, :, 7]  # NIR
       b3 = img[:, :, 2]  # Green
-      b8 = (b8 - np.min(b8)) / (np.max(b8) - np.min(b8))
-      b3 = (b3 - np.min(b3)) / (np.max(b3) - np.min(b3))
-      img = (b3 - b8) / (b3 + b8)
+      img = (b3 - b8) / (b3 + b8 + 1e-8)
       img = np.expand_dims(img, axis=-1) 
     else:
       assert "Invalid band selection!"
     return img
 
   def normalize(self, img):
-    img = img.astype(np.float32)
     for i in range(img.shape[-1]):
       m = np.min(img[:,:,i])
       M = np.max(img[:,:,i])
-      img[:,:,i] = (img[:,:,i]-m)/(M-m)
+      img[:,:,i] = (img[:,:,i]-m)/(M-m+1e-6)
     img[~np.isfinite(img)] = 0
     return img
 
@@ -59,6 +55,9 @@ class SWED(Dataset):
       img = tiff.imread(im_path).transpose(1, 2, 0)
       label = tiff.imread(label_path)
 
+    # Convert to float32
+    img = np.array(img, dtype=np.float32)
+
     # Select the bands accordingly
     img = self.select_bands(img)
     
@@ -70,7 +69,6 @@ class SWED(Dataset):
   def __getitem__(self,idx):
     # Load images 
     img, label = self.read_image(idx)
-
     if self.transform is not None:
       # Read a random image to paste
       paste_idx = random.randint(0, self.__len__() - 1)
@@ -78,14 +76,19 @@ class SWED(Dataset):
       
       # Invert 0 and 1 in order to paste areas without water
       paste_label_inversed = np.where((paste_label==0)|(paste_label==1), paste_label^1, paste_label)
-      out = self.transform(image = img, masks = np.expand_dims(label, 0),
-                           bboxes = extract_bboxes(np.expand_dims(label, 0)),
-                           paste_image = paste_img, paste_masks = np.expand_dims(paste_label_inversed, 0),
-                           paste_bboxes = extract_bboxes(np.expand_dims(paste_label_inversed, 0)))
-      encoded_inputs = self.image_processor(out['image'], return_tensors="pt")
+      bboxes = extract_bboxes(np.expand_dims(label, 0))
+      paste_bboxes = extract_bboxes(np.expand_dims(paste_label_inversed, 0))
+      if all(all(x == 0 for x in bbox) for bbox in bboxes):
+         encoded_inputs = self.image_processor(img, return_tensors="pt")
+      else:
+        out = self.transform(image = img, masks = np.expand_dims(label, 0),
+                            bboxes = bboxes,
+                            paste_image = paste_img, paste_masks = np.expand_dims(paste_label_inversed, 0),
+                            paste_bboxes = paste_bboxes)
+        encoded_inputs = self.image_processor(out['image'], return_tensors="pt")
       
-      # Replace with the new segmentation map
-      label = np.array(out['masks'][0])
+        # Replace with the new segmentation map
+        label = np.array(out['masks'][0])
     else:
       encoded_inputs = self.image_processor(img, return_tensors="pt")
 
@@ -93,7 +96,7 @@ class SWED(Dataset):
       encoded_inputs[k] = v.squeeze(0) # remove batch dimension
 
     # Add the original image and labels as well
-    encoded_inputs["original_image"] = img.astype(np.uint8)
+    encoded_inputs["original_image"] = img
     encoded_inputs["original_labels"] = torch.from_numpy(label).long()
 
     return encoded_inputs

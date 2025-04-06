@@ -30,9 +30,6 @@ if __name__ == '__main__':
     with open(args.config) as file:
         cfg = yaml.safe_load(file)
 
-    # Load dataset
-    image_processor = SegformerImageProcessor(reduce_labels=True)
-
     # Create the current experiment's path
     experiments_path = cfg['EXPERIMENT']['exp_path']
     os.makedirs(experiments_path, exist_ok=True)
@@ -87,7 +84,7 @@ if __name__ == '__main__':
     id2label = {int(k): v for k, v in id2label.items()}
     label2id = {v: k for k, v in id2label.items()}
 
-    # Devine the model
+    # Define the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('Running on device: ', device)
     ckp_path = cfg['MODEL_PARAMS']['checkpoint']
@@ -195,30 +192,6 @@ if __name__ == '__main__':
                 # Convert preds and labels to numpy 
                 pred_arr = predicted.detach().cpu().numpy()
                 labels_arr = labels.detach().cpu().numpy()
-
-                # If last epoch => save the predition map
-                if epoch == cfg['TRAIN_PARAMS']['num_epochs'] - 1:    
-                    orig_img = np.array(batch["original_image"].squeeze())
-                    predicted_segmentation_map = image_processor.post_process_semantic_segmentation(outputs, target_sizes=[(256,256)])[0]
-                    predicted_segmentation_map = predicted_segmentation_map.cpu().numpy()
-
-                    h, w = predicted_segmentation_map.shape
-                    color_seg = np.zeros((h, w, 3), dtype=np.uint8)
-                    for label, color in enumerate(palette):
-                        color_seg[predicted_segmentation_map == label, :] = color
-
-                    # Segmentation map
-                    img = orig_img * 0.8 + color_seg * 0.2
-                    img = img.astype(np.uint8)
-                    plt.imsave(inference_path + '/output_' + str(idx)+'.png', img)
-
-                    # Save the true segmentation map
-                    color_seg = np.zeros((h, w, 3), dtype=np.uint8)
-                    for label, color in enumerate(palette):
-                        color_seg[labels_arr == label, :] = color
-                    img = orig_img * 0.8 + color_seg * 0.2
-                    img = img.astype(np.uint8)
-                    plt.imsave(inference_path + '/output_' + str(idx)+'_true.png', img)
 
                 # Add batch
                 val_iou_metric.add_batch(predictions=pred_arr, references=labels_arr)
